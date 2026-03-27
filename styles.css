@@ -81,8 +81,13 @@ body {
   letter-spacing: 1px;
   padding: 3px 8px;
   border-radius: 4px;
-  background: var(--blue-dim);
-  color: var(--blue);
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.header-badge.simulated {
+  background: var(--amber-dim);
+  color: var(--amber);
 }
 
 .header-stats {

@@ -1,11 +1,10 @@
 // ============================================================
-// Trading Simulator — Data Layer (API-backed via yfinance)
+// Trading Simulator — Data Layer (API-backed, dual mode)
 // ============================================================
 
 const Simulator = (() => {
   const INITIAL_CAPITAL = 1000;
 
-  // Period mapping to yfinance params
   const PERIODS = {
     "24h":  { period: "1d",  interval: "5m",  label: "24H" },
     "48h":  { period: "2d",  interval: "15m", label: "48H" },
@@ -17,7 +16,6 @@ const Simulator = (() => {
     "YTD":  { period: "ytd", interval: "1d",  label: "YTD" },
   };
 
-  // Default portfolio allocation
   const DEFAULT_PORTFOLIO = [
     { ticker: "AAPL",  allocation: 15 },
     { ticker: "MSFT",  allocation: 12 },
@@ -32,11 +30,12 @@ const Simulator = (() => {
   ];
 
   // State
-  let portfolio = [];     // [{ ticker, name, sector, category, allocation, shares, costBasis, investedValue }]
-  let universe = [];      // full universe from server
-  let priceCache = {};    // { "AAPL_1mo_1d": { timestamps, close, ... } }
-  let quoteCache = {};    // { "AAPL": { price, previousClose } }
+  let portfolio = [];
+  let universe = [];
+  let priceCache = {};
+  let quoteCache = {};
   let macroData = null;
+  let dataSource = "unknown"; // "live" or "simulated"
   let isInitialized = false;
 
   // --- API helpers ---
@@ -49,7 +48,9 @@ const Simulator = (() => {
   async function fetchPrices(tickers, period, interval) {
     const key = `${tickers.join(",")}_${period}_${interval}`;
     if (priceCache[key]) return priceCache[key];
-    const data = await apiFetch(`/api/prices?tickers=${tickers.join(",")}&period=${period}&interval=${interval}`);
+    const resp = await apiFetch(`/api/prices?tickers=${tickers.join(",")}&period=${period}&interval=${interval}`);
+    const data = resp.data || resp;
+    dataSource = resp.source || "unknown";
     priceCache[key] = data;
     return data;
   }
@@ -57,7 +58,9 @@ const Simulator = (() => {
   async function fetchQuotes(tickers) {
     const needed = tickers.filter(t => !quoteCache[t]);
     if (needed.length > 0) {
-      const data = await apiFetch(`/api/quotes?tickers=${needed.join(",")}`);
+      const resp = await apiFetch(`/api/quotes?tickers=${needed.join(",")}`);
+      const data = resp.data || resp;
+      dataSource = resp.source || dataSource;
       Object.assign(quoteCache, data);
     }
     const result = {};
@@ -67,24 +70,17 @@ const Simulator = (() => {
 
   // --- Init ---
   async function init() {
-    // Fetch universe
     universe = await apiFetch("/api/universe");
 
-    // Load portfolio from localStorage or use default
     const saved = localStorage.getItem("sim_portfolio");
     if (saved) {
-      try {
-        portfolio = JSON.parse(saved);
-      } catch {
-        portfolio = [];
-      }
+      try { portfolio = JSON.parse(saved); } catch { portfolio = []; }
     }
 
     if (!portfolio.length) {
       await initDefaultPortfolio();
     }
 
-    // Fetch initial data
     await refreshData();
     isInitialized = true;
   }
@@ -117,7 +113,6 @@ const Simulator = (() => {
     const tickers = portfolio.map(p => p.ticker);
     if (tickers.length === 0) return;
 
-    // Fetch quotes and macro in parallel
     const [quotes, macro] = await Promise.all([
       fetchQuotes(tickers),
       apiFetch("/api/macro"),
@@ -144,7 +139,6 @@ const Simulator = (() => {
       return { ...pos, currentPrice, currentValue, pnl, pnlPct, allocation: 0 };
     });
 
-    // Compute actual allocations
     for (const pos of positions) {
       pos.allocation = totalValue > 0 ? (pos.currentValue / totalValue) * 100 : 0;
     }
@@ -157,22 +151,18 @@ const Simulator = (() => {
 
   function getAllocationData() {
     return getPositions().map(p => ({
-      name: p.name,
-      ticker: p.ticker,
-      allocation: p.allocation,
-      value: p.currentValue,
+      name: p.name, ticker: p.ticker, allocation: p.allocation, value: p.currentValue,
     }));
   }
 
   // --- Performance Series ---
   async function getPortfolioValueSeries(periodKey) {
-    const periodConfig = PERIODS[periodKey];
-    if (!periodConfig) return { timestamps: [], values: [] };
+    const config = PERIODS[periodKey];
+    if (!config) return { timestamps: [], values: [] };
 
     const tickers = portfolio.map(p => p.ticker);
-    const priceData = await fetchPrices(tickers, periodConfig.period, periodConfig.interval);
+    const priceData = await fetchPrices(tickers, config.period, config.interval);
 
-    // Find common timestamps (use first ticker's timestamps as reference)
     const refTicker = Object.keys(priceData)[0];
     if (!refTicker) return { timestamps: [], values: [] };
 
@@ -197,13 +187,7 @@ const Simulator = (() => {
   async function getReturns() {
     const returns = {};
     const tickers = portfolio.map(p => p.ticker);
-
-    // Fetch 1y data to compute all periods
     const priceData = await fetchPrices(tickers, "1y", "1d");
-
-    const periodDays = {
-      "24h": 1, "48h": 2, "1w": 5, "1m": 21, "3m": 63, "6m": 126, "12m": 252, "YTD": -1,
-    };
 
     const refTicker = Object.keys(priceData)[0];
     if (!refTicker) return returns;
@@ -211,18 +195,20 @@ const Simulator = (() => {
     const len = priceData[refTicker].close.length;
     const timestamps = priceData[refTicker].timestamps;
 
-    // Current portfolio value (last day)
     const currentValue = portfolio.reduce((s, pos) => {
       const data = priceData[pos.ticker];
-      return s + (data ? pos.shares * data.close[len - 1] : 0);
+      return s + (data && data.close.length ? pos.shares * data.close[len - 1] : 0);
     }, 0);
+
+    const periodDays = {
+      "24h": 1, "48h": 2, "1w": 5, "1m": 21, "3m": 63, "6m": 126, "12m": 252, "YTD": -1,
+    };
 
     for (const [key, days] of Object.entries(periodDays)) {
       let idx;
       if (days === -1) {
-        // YTD: find first trading day of current year
-        const currentYear = new Date().getFullYear();
-        idx = timestamps.findIndex(t => new Date(t).getFullYear() === currentYear);
+        const yr = new Date().getFullYear();
+        idx = timestamps.findIndex(t => new Date(t).getFullYear() === yr);
         if (idx === -1) idx = 0;
       } else {
         idx = Math.max(0, len - 1 - days);
@@ -230,7 +216,7 @@ const Simulator = (() => {
 
       const pastValue = portfolio.reduce((s, pos) => {
         const data = priceData[pos.ticker];
-        return s + (data ? pos.shares * data.close[idx] : 0);
+        return s + (data && data.close.length ? pos.shares * data.close[idx] : 0);
       }, 0);
 
       returns[key] = pastValue > 0 ? ((currentValue - pastValue) / pastValue) * 100 : 0;
@@ -263,7 +249,6 @@ const Simulator = (() => {
       };
     });
 
-    // Clear price cache to force refresh
     priceCache = {};
     savePortfolio();
   }
@@ -277,21 +262,16 @@ const Simulator = (() => {
     if (!refTicker) return {};
 
     const len = priceData[refTicker].close.length;
-
-    // Build daily portfolio value series
     const dailyValues = [];
     for (let i = 0; i < len; i++) {
       let total = 0;
       for (const pos of portfolio) {
         const data = priceData[pos.ticker];
-        if (data && data.close[i] !== undefined) {
-          total += pos.shares * data.close[i];
-        }
+        if (data && data.close[i] !== undefined) total += pos.shares * data.close[i];
       }
       dailyValues.push(total);
     }
 
-    // Daily returns
     const dailyReturns = [];
     for (let i = 1; i < dailyValues.length; i++) {
       if (dailyValues[i - 1] > 0) {
@@ -304,30 +284,21 @@ const Simulator = (() => {
     const mean = dailyReturns.reduce((s, r) => s + r, 0) / dailyReturns.length;
     const variance = dailyReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / dailyReturns.length;
     const stdDev = Math.sqrt(variance);
-
     const annualVol = stdDev * Math.sqrt(252);
     const annualReturn = mean * 252;
-    const riskFreeRate = 0.045;
-    const sharpe = annualVol > 0 ? (annualReturn - riskFreeRate) / annualVol : 0;
+    const sharpe = annualVol > 0 ? (annualReturn - 0.045) / annualVol : 0;
 
-    // Max drawdown
-    let peak = dailyValues[0];
-    let maxDD = 0;
+    let peak = dailyValues[0], maxDD = 0;
     for (const v of dailyValues) {
       if (v > peak) peak = v;
       const dd = (peak - v) / peak;
       if (dd > maxDD) maxDD = dd;
     }
 
-    // VaR 95%
     const sorted = [...dailyReturns].sort((a, b) => a - b);
-    const varIdx = Math.floor(sorted.length * 0.05);
-    const var95 = sorted[varIdx] || 0;
-
-    // Concentration (Herfindahl)
+    const var95 = sorted[Math.floor(sorted.length * 0.05)] || 0;
     const allocations = getAllocationData();
     const hhi = allocations.reduce((s, a) => s + (a.allocation / 100) ** 2, 0);
-
     const totalValue = getTotalValue();
 
     return {
@@ -342,12 +313,9 @@ const Simulator = (() => {
     };
   }
 
-  // --- Macro ---
-  function getMacroData() {
-    return macroData || {};
-  }
+  function getMacroData() { return macroData || {}; }
+  function getDataSource() { return dataSource; }
 
-  // --- Key Drivers ---
   function getKeyDrivers() {
     const positions = getPositions();
     const sorted = [...positions].sort((a, b) => b.pnl - a.pnl);
@@ -357,13 +325,8 @@ const Simulator = (() => {
     };
   }
 
-  function getUniverse() {
-    return [...universe];
-  }
-
-  function getPortfolio() {
-    return [...portfolio];
-  }
+  function getUniverse() { return [...universe]; }
+  function getPortfolio() { return [...portfolio]; }
 
   function resetPortfolio() {
     localStorage.removeItem("sim_portfolio");
@@ -373,22 +336,12 @@ const Simulator = (() => {
   }
 
   return {
-    init,
-    refreshData,
-    getPositions,
-    getTotalValue,
-    getAllocationData,
-    getPortfolioValueSeries,
-    getReturns,
-    rebalance,
-    getRiskMetrics,
-    getMacroData,
-    getKeyDrivers,
-    getUniverse,
-    getPortfolio,
-    resetPortfolio,
-    fetchQuotes,
-    INITIAL_CAPITAL,
-    PERIODS,
+    init, refreshData,
+    getPositions, getTotalValue, getAllocationData,
+    getPortfolioValueSeries, getReturns,
+    rebalance, getRiskMetrics,
+    getMacroData, getDataSource, getKeyDrivers,
+    getUniverse, getPortfolio, resetPortfolio, fetchQuotes,
+    INITIAL_CAPITAL, PERIODS,
   };
 })();

@@ -41,6 +41,13 @@
     try {
       await Simulator.init();
       await renderAll();
+      // Show data source
+      const src = Simulator.getDataSource();
+      const badge = $('#data-source-badge');
+      if (badge) {
+        badge.textContent = src === 'live' ? 'Live Data' : 'Simulated Data';
+        badge.className = 'header-badge ' + (src === 'live' ? '' : 'simulated');
+      }
     } catch (err) {
       console.error('Init error:', err);
       showError('Failed to initialize. Make sure the server is running (python server.py).');

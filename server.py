@@ -1,15 +1,17 @@
 """
 Portfolio Trading Simulator — Backend Server
-Uses yfinance for robust market data, Flask for API + static serving.
+Dual mode: Live data via yfinance when available, realistic simulation fallback.
 """
 
 import json
+import math
 import os
+import random
+import time
 from datetime import datetime, timedelta
 from functools import lru_cache
 
 import pandas as pd
-import yfinance as yf
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
@@ -20,75 +22,221 @@ CORS(app)
 # Asset Universe — ESG screened, no defense/weapons stocks
 # ============================================================
 ASSET_UNIVERSE = {
-    # US Large Cap Tech
-    "AAPL":  {"name": "Apple",              "sector": "Tech",               "category": "US Large Cap"},
-    "MSFT":  {"name": "Microsoft",          "sector": "Tech",               "category": "US Large Cap"},
-    "NVDA":  {"name": "NVIDIA",             "sector": "Semiconductors",     "category": "US Large Cap"},
-    "AMZN":  {"name": "Amazon",             "sector": "Consumer/Cloud",     "category": "US Large Cap"},
-    "GOOGL": {"name": "Alphabet",           "sector": "Tech",               "category": "US Large Cap"},
-    "META":  {"name": "Meta Platforms",     "sector": "Tech",               "category": "US Large Cap"},
-    "TSLA":  {"name": "Tesla",              "sector": "EV/Energy",          "category": "US Large Cap"},
-    # US Broader
-    "SPY":   {"name": "S&P 500 ETF",        "sector": "Index",              "category": "US Index"},
-    "QQQ":   {"name": "Nasdaq 100 ETF",     "sector": "Index",              "category": "US Index"},
-    "IWM":   {"name": "Russell 2000 ETF",   "sector": "Small Cap",          "category": "US Index"},
-    # Healthcare / Consumer
-    "JNJ":   {"name": "Johnson & Johnson",  "sector": "Healthcare",         "category": "US Large Cap"},
-    "UNH":   {"name": "UnitedHealth",       "sector": "Healthcare",         "category": "US Large Cap"},
-    "V":     {"name": "Visa",               "sector": "Financials",         "category": "US Large Cap"},
-    "JPM":   {"name": "JPMorgan Chase",     "sector": "Financials",         "category": "US Large Cap"},
-    # International / Emerging Markets
-    "EEM":   {"name": "Emerging Markets ETF", "sector": "EM Equity",        "category": "Emerging Markets"},
-    "VWO":   {"name": "Vanguard EM ETF",    "sector": "EM Equity",          "category": "Emerging Markets"},
-    "EFA":   {"name": "Intl Developed ETF", "sector": "Intl Developed",     "category": "International"},
-    "VEA":   {"name": "Vanguard Intl ETF",  "sector": "Intl Developed",     "category": "International"},
-    "FXI":   {"name": "China Large Cap ETF", "sector": "China Equity",      "category": "Emerging Markets"},
-    "EWZ":   {"name": "Brazil ETF",         "sector": "LatAm Equity",       "category": "Emerging Markets"},
-    "INDA":  {"name": "India ETF",          "sector": "India Equity",       "category": "Emerging Markets"},
-    # Commodities
-    "GLD":   {"name": "Gold ETF",           "sector": "Precious Metals",    "category": "Commodities"},
-    "SLV":   {"name": "Silver ETF",         "sector": "Precious Metals",    "category": "Commodities"},
-    "USO":   {"name": "Oil ETF",            "sector": "Energy Commodity",   "category": "Commodities"},
-    "DBA":   {"name": "Agriculture ETF",    "sector": "Agriculture",        "category": "Commodities"},
-    # Fixed Income
-    "TLT":   {"name": "20+ Year Treasury",  "sector": "Long Bonds",         "category": "Fixed Income"},
-    "BND":   {"name": "Total Bond Market",  "sector": "Bonds",              "category": "Fixed Income"},
-    "HYG":   {"name": "High Yield Corp",    "sector": "Credit",             "category": "Fixed Income"},
-    # ESG / Clean Energy
-    "ICLN":  {"name": "Clean Energy ETF",   "sector": "Clean Energy",       "category": "ESG"},
-    "TAN":   {"name": "Solar ETF",          "sector": "Solar",              "category": "ESG"},
-    # REITs
-    "VNQ":   {"name": "Real Estate ETF",    "sector": "REITs",              "category": "Real Estate"},
-    # Crypto proxy
-    "BITO":  {"name": "Bitcoin Strategy ETF", "sector": "Crypto",           "category": "Crypto"},
+    "AAPL":  {"name": "Apple",              "sector": "Tech",               "category": "US Large Cap",      "basePrice": 195.50, "annualVol": 0.28, "annualReturn": 0.12},
+    "MSFT":  {"name": "Microsoft",          "sector": "Tech",               "category": "US Large Cap",      "basePrice": 425.00, "annualVol": 0.26, "annualReturn": 0.10},
+    "NVDA":  {"name": "NVIDIA",             "sector": "Semiconductors",     "category": "US Large Cap",      "basePrice": 895.00, "annualVol": 0.48, "annualReturn": 0.20},
+    "AMZN":  {"name": "Amazon",             "sector": "Consumer/Cloud",     "category": "US Large Cap",      "basePrice": 188.00, "annualVol": 0.30, "annualReturn": 0.11},
+    "GOOGL": {"name": "Alphabet",           "sector": "Tech",               "category": "US Large Cap",      "basePrice": 158.00, "annualVol": 0.28, "annualReturn": 0.09},
+    "META":  {"name": "Meta Platforms",     "sector": "Tech",               "category": "US Large Cap",      "basePrice": 515.00, "annualVol": 0.35, "annualReturn": 0.14},
+    "TSLA":  {"name": "Tesla",              "sector": "EV/Energy",          "category": "US Large Cap",      "basePrice": 178.00, "annualVol": 0.55, "annualReturn": 0.08},
+    "SPY":   {"name": "S&P 500 ETF",        "sector": "Index",              "category": "US Index",          "basePrice": 528.00, "annualVol": 0.14, "annualReturn": 0.09},
+    "QQQ":   {"name": "Nasdaq 100 ETF",     "sector": "Index",              "category": "US Index",          "basePrice": 448.00, "annualVol": 0.18, "annualReturn": 0.11},
+    "IWM":   {"name": "Russell 2000 ETF",   "sector": "Small Cap",          "category": "US Index",          "basePrice": 205.00, "annualVol": 0.20, "annualReturn": 0.07},
+    "JNJ":   {"name": "Johnson & Johnson",  "sector": "Healthcare",         "category": "US Large Cap",      "basePrice": 155.00, "annualVol": 0.16, "annualReturn": 0.05},
+    "UNH":   {"name": "UnitedHealth",       "sector": "Healthcare",         "category": "US Large Cap",      "basePrice": 520.00, "annualVol": 0.22, "annualReturn": 0.08},
+    "V":     {"name": "Visa",               "sector": "Financials",         "category": "US Large Cap",      "basePrice": 285.00, "annualVol": 0.20, "annualReturn": 0.10},
+    "JPM":   {"name": "JPMorgan Chase",     "sector": "Financials",         "category": "US Large Cap",      "basePrice": 198.00, "annualVol": 0.24, "annualReturn": 0.09},
+    "EEM":   {"name": "Emerging Markets ETF","sector": "EM Equity",          "category": "Emerging Markets",  "basePrice": 42.50,  "annualVol": 0.20, "annualReturn": 0.06},
+    "VWO":   {"name": "Vanguard EM ETF",    "sector": "EM Equity",          "category": "Emerging Markets",  "basePrice": 43.00,  "annualVol": 0.19, "annualReturn": 0.06},
+    "EFA":   {"name": "Intl Developed ETF", "sector": "Intl Developed",     "category": "International",     "basePrice": 79.00,  "annualVol": 0.15, "annualReturn": 0.05},
+    "VEA":   {"name": "Vanguard Intl ETF",  "sector": "Intl Developed",     "category": "International",     "basePrice": 50.50,  "annualVol": 0.15, "annualReturn": 0.05},
+    "FXI":   {"name": "China Large Cap ETF","sector": "China Equity",       "category": "Emerging Markets",  "basePrice": 28.00,  "annualVol": 0.28, "annualReturn": 0.04},
+    "EWZ":   {"name": "Brazil ETF",         "sector": "LatAm Equity",       "category": "Emerging Markets",  "basePrice": 32.00,  "annualVol": 0.30, "annualReturn": 0.05},
+    "INDA":  {"name": "India ETF",          "sector": "India Equity",       "category": "Emerging Markets",  "basePrice": 52.00,  "annualVol": 0.22, "annualReturn": 0.08},
+    "GLD":   {"name": "Gold ETF",           "sector": "Precious Metals",    "category": "Commodities",       "basePrice": 200.00, "annualVol": 0.14, "annualReturn": 0.06},
+    "SLV":   {"name": "Silver ETF",         "sector": "Precious Metals",    "category": "Commodities",       "basePrice": 23.00,  "annualVol": 0.25, "annualReturn": 0.04},
+    "USO":   {"name": "Oil ETF",            "sector": "Energy Commodity",   "category": "Commodities",       "basePrice": 76.00,  "annualVol": 0.30, "annualReturn": 0.03},
+    "DBA":   {"name": "Agriculture ETF",    "sector": "Agriculture",        "category": "Commodities",       "basePrice": 24.50,  "annualVol": 0.15, "annualReturn": 0.02},
+    "TLT":   {"name": "20+ Year Treasury",  "sector": "Long Bonds",         "category": "Fixed Income",      "basePrice": 92.00,  "annualVol": 0.16, "annualReturn": 0.03},
+    "BND":   {"name": "Total Bond Market",  "sector": "Bonds",              "category": "Fixed Income",      "basePrice": 73.00,  "annualVol": 0.06, "annualReturn": 0.035},
+    "HYG":   {"name": "High Yield Corp",    "sector": "Credit",             "category": "Fixed Income",      "basePrice": 77.00,  "annualVol": 0.08, "annualReturn": 0.05},
+    "ICLN":  {"name": "Clean Energy ETF",   "sector": "Clean Energy",       "category": "ESG",               "basePrice": 14.50,  "annualVol": 0.32, "annualReturn": 0.06},
+    "TAN":   {"name": "Solar ETF",          "sector": "Solar",              "category": "ESG",               "basePrice": 42.00,  "annualVol": 0.38, "annualReturn": 0.07},
+    "VNQ":   {"name": "Real Estate ETF",    "sector": "REITs",              "category": "Real Estate",       "basePrice": 85.00,  "annualVol": 0.18, "annualReturn": 0.05},
+    "BITO":  {"name": "Bitcoin Strategy ETF","sector": "Crypto",            "category": "Crypto",            "basePrice": 28.00,  "annualVol": 0.60, "annualReturn": 0.15},
 }
 
-# Defense exclusion list (for validation)
 EXCLUDED_TICKERS = {
     "LMT", "RTX", "NOC", "BA", "GD", "HII", "LHX", "LDOS",
     "PLTR", "BWXT", "KTOS", "AVAV", "HEI", "TDG",
 }
 
+# Correlation groups for realistic co-movement
+CORRELATION_GROUPS = {
+    "US Tech": ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "QQQ"],
+    "US Broad": ["SPY", "IWM", "V", "JPM"],
+    "Healthcare": ["JNJ", "UNH"],
+    "EM": ["EEM", "VWO", "FXI", "EWZ", "INDA"],
+    "Intl Dev": ["EFA", "VEA"],
+    "Commodities": ["GLD", "SLV", "USO", "DBA"],
+    "Bonds": ["TLT", "BND", "HYG"],
+    "Alt": ["TSLA", "ICLN", "TAN", "VNQ", "BITO"],
+}
 
-def _get_cache_key():
-    """Cache key changes every 15 minutes to balance freshness and rate limits."""
-    now = datetime.utcnow()
-    return f"{now.strftime('%Y-%m-%d-%H')}-{now.minute // 15}"
+# ============================================================
+# Simulation Engine (fallback when yfinance unavailable)
+# ============================================================
+_sim_seed = int(time.time() // 86400)  # changes daily
+_sim_cache = {}
+
+def _seeded_random(seed):
+    """Simple deterministic RNG."""
+    rng = random.Random(seed)
+    return rng
+
+def _generate_correlated_returns(rng, n_periods, dt):
+    """Generate correlated returns for all assets using group correlation."""
+    tickers = list(ASSET_UNIVERSE.keys())
+    n = len(tickers)
+
+    # Build group factor returns
+    group_factors = {}
+    for gname in CORRELATION_GROUPS:
+        group_factors[gname] = [rng.gauss(0, 1) for _ in range(n_periods)]
+
+    # Market factor
+    market_factor = [rng.gauss(0, 1) for _ in range(n_periods)]
+
+    # Assign each ticker to its group
+    ticker_group = {}
+    for gname, members in CORRELATION_GROUPS.items():
+        for t in members:
+            ticker_group[t] = gname
+
+    all_returns = {}
+    for ticker in tickers:
+        asset = ASSET_UNIVERSE[ticker]
+        vol = asset["annualVol"]
+        drift = asset["annualReturn"]
+        group = ticker_group.get(ticker)
+
+        returns = []
+        for p in range(n_periods):
+            # 40% market, 30% group, 30% idiosyncratic
+            mkt = market_factor[p]
+            grp = group_factors.get(group, market_factor)[p] if group else mkt
+            idio = rng.gauss(0, 1)
+            z = 0.4 * mkt + 0.3 * grp + 0.3 * idio
+
+            r = (drift - 0.5 * vol ** 2) * dt + vol * math.sqrt(dt) * z
+            returns.append(r)
+        all_returns[ticker] = returns
+
+    return all_returns
 
 
-@lru_cache(maxsize=64)
-def fetch_price_history(ticker, period, interval, _cache_key=None):
-    """Fetch price history from Yahoo Finance with caching."""
+def _generate_price_history(period, interval):
+    """Generate simulated price history matching yfinance output format."""
+    cache_key = f"{period}_{interval}_{_sim_seed}"
+    if cache_key in _sim_cache:
+        return _sim_cache[cache_key]
+
+    now = datetime.utcnow().replace(second=0, microsecond=0)
+
+    # Map period/interval to number of data points and step size
+    period_map = {
+        "1d":  (24 * 12, timedelta(minutes=5)),     # 5min bars for 1 day
+        "2d":  (48 * 4, timedelta(minutes=15)),      # 15min bars for 2 days
+        "5d":  (5 * 7, timedelta(hours=1)),           # hourly for 5 days
+        "1mo": (21, timedelta(days=1)),               # daily for 1 month
+        "3mo": (63, timedelta(days=1)),               # daily for 3 months
+        "6mo": (126, timedelta(days=1)),              # daily for 6 months
+        "1y":  (252, timedelta(days=1)),              # daily for 1 year
+        "ytd": (None, timedelta(days=1)),             # daily from Jan 1
+    }
+
+    if period == "ytd":
+        jan1 = datetime(now.year, 1, 1)
+        n_periods = (now - jan1).days
+        step = timedelta(days=1)
+    else:
+        n_periods, step = period_map.get(period, (252, timedelta(days=1)))
+
+    if n_periods is None or n_periods < 1:
+        n_periods = 21
+
+    # Calculate dt in years
+    if step >= timedelta(days=1):
+        dt = step.days / 365.0
+    else:
+        dt = step.total_seconds() / (365.25 * 24 * 3600)
+
+    rng = _seeded_random(_sim_seed + hash(period))
+    all_returns = _generate_correlated_returns(rng, n_periods, dt)
+
+    result = {}
+    for ticker in ASSET_UNIVERSE:
+        asset = ASSET_UNIVERSE[ticker]
+        base = asset["basePrice"]
+
+        timestamps = []
+        opens, highs, lows, closes, volumes = [], [], [], [], []
+
+        price = base
+        for i in range(n_periods):
+            ts = now - (n_periods - i) * step
+            # Skip weekends for daily data
+            if step >= timedelta(days=1) and ts.weekday() >= 5:
+                continue
+
+            r = all_returns[ticker][i]
+            open_p = price
+            close_p = price * math.exp(r)
+
+            # Intraday high/low noise
+            spread = abs(close_p - open_p) + price * asset["annualVol"] * math.sqrt(dt) * 0.3
+            high_p = max(open_p, close_p) + abs(rng.gauss(0, spread * 0.3))
+            low_p = min(open_p, close_p) - abs(rng.gauss(0, spread * 0.3))
+            low_p = max(low_p, 0.01)
+
+            vol = int(rng.gauss(5_000_000, 2_000_000) * (base / 100))
+            vol = max(vol, 100_000)
+
+            timestamps.append(ts.isoformat())
+            opens.append(round(open_p, 4))
+            highs.append(round(high_p, 4))
+            lows.append(round(low_p, 4))
+            closes.append(round(close_p, 4))
+            volumes.append(vol)
+
+            price = close_p
+
+        result[ticker] = {
+            "timestamps": timestamps,
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+        }
+
+    _sim_cache[cache_key] = result
+    return result
+
+
+def _try_yfinance(tickers, period, interval):
+    """Try fetching from yfinance, return None on failure."""
     try:
-        t = yf.Ticker(ticker)
-        df = t.history(period=period, interval=interval)
-        if df.empty:
-            return None
-        df.index = df.index.tz_localize(None) if df.index.tz is not None else df.index
-        return df
+        import yfinance as yf
+        result = {}
+        for ticker in tickers:
+            t = yf.Ticker(ticker)
+            df = t.history(period=period, interval=interval)
+            if df is not None and not df.empty:
+                df.index = df.index.tz_localize(None) if df.index.tz is not None else df.index
+                result[ticker] = {
+                    "timestamps": [ts.isoformat() for ts in df.index],
+                    "open": df["Open"].round(4).tolist(),
+                    "high": df["High"].round(4).tolist(),
+                    "low": df["Low"].round(4).tolist(),
+                    "close": df["Close"].round(4).tolist(),
+                    "volume": df["Volume"].tolist(),
+                }
+        if result:
+            return result
     except Exception as e:
-        print(f"Error fetching {ticker}: {e}")
-        return None
+        print(f"yfinance unavailable: {e}")
+    return None
 
 
 # ============================================================
@@ -102,180 +250,150 @@ def index():
 
 @app.route("/api/universe")
 def get_universe():
-    """Return the full investable asset universe."""
     result = []
     for ticker, info in ASSET_UNIVERSE.items():
-        result.append({"ticker": ticker, **info})
+        result.append({"ticker": ticker, "name": info["name"], "sector": info["sector"],
+                        "category": info["category"]})
     return jsonify(result)
 
 
 @app.route("/api/prices")
 def get_prices():
-    """
-    Fetch historical prices for given tickers.
-    Query params:
-      tickers: comma-separated list (e.g. AAPL,MSFT,SPY)
-      period:  yfinance period string (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y)
-      interval: yfinance interval string (1m, 5m, 15m, 1h, 1d, 1wk)
-    """
     tickers = request.args.get("tickers", "SPY").split(",")
     period = request.args.get("period", "1mo")
     interval = request.args.get("interval", "1d")
-
-    # Validate tickers
     tickers = [t.strip().upper() for t in tickers if t.strip()]
     tickers = [t for t in tickers if t not in EXCLUDED_TICKERS]
 
-    cache_key = _get_cache_key()
-    result = {}
+    # Try live data first
+    live = _try_yfinance(tickers, period, interval)
+    if live:
+        return jsonify({"data": live, "source": "live"})
 
-    for ticker in tickers:
-        df = fetch_price_history(ticker, period, interval, cache_key)
-        if df is not None and not df.empty:
-            result[ticker] = {
-                "timestamps": [ts.isoformat() for ts in df.index],
-                "open": df["Open"].round(4).tolist(),
-                "high": df["High"].round(4).tolist(),
-                "low": df["Low"].round(4).tolist(),
-                "close": df["Close"].round(4).tolist(),
-                "volume": df["Volume"].tolist(),
-            }
-
-    return jsonify(result)
+    # Fallback to simulation
+    all_sim = _generate_price_history(period, interval)
+    result = {t: all_sim[t] for t in tickers if t in all_sim}
+    return jsonify({"data": result, "source": "simulated"})
 
 
 @app.route("/api/quotes")
 def get_quotes():
-    """Get latest quote for tickers."""
     tickers = request.args.get("tickers", "SPY").split(",")
     tickers = [t.strip().upper() for t in tickers if t.strip()]
     tickers = [t for t in tickers if t not in EXCLUDED_TICKERS]
 
-    result = {}
-    for ticker in tickers:
-        try:
+    # Try yfinance
+    try:
+        import yfinance as yf
+        result = {}
+        for ticker in tickers:
             t = yf.Ticker(ticker)
             info = t.fast_info
-            result[ticker] = {
-                "price": round(float(info.last_price), 2) if hasattr(info, 'last_price') else None,
-                "previousClose": round(float(info.previous_close), 2) if hasattr(info, 'previous_close') else None,
-                "marketCap": int(info.market_cap) if hasattr(info, 'market_cap') and info.market_cap else None,
-            }
-        except Exception as e:
-            print(f"Quote error for {ticker}: {e}")
-            result[ticker] = {"price": None, "error": str(e)}
+            if hasattr(info, 'last_price') and info.last_price:
+                result[ticker] = {
+                    "price": round(float(info.last_price), 2),
+                    "previousClose": round(float(info.previous_close), 2) if hasattr(info, 'previous_close') else None,
+                }
+        if result:
+            return jsonify({"data": result, "source": "live"})
+    except Exception:
+        pass
 
-    return jsonify(result)
+    # Fallback: use latest simulated close
+    sim = _generate_price_history("1mo", "1d")
+    result = {}
+    for ticker in tickers:
+        if ticker in sim and sim[ticker]["close"]:
+            closes = sim[ticker]["close"]
+            result[ticker] = {
+                "price": closes[-1],
+                "previousClose": closes[-2] if len(closes) > 1 else closes[-1],
+            }
+    return jsonify({"data": result, "source": "simulated"})
 
 
 @app.route("/api/macro")
 def get_macro():
-    """
-    Compute macro indicators from real market data.
-    Uses SPY, TLT, GLD, EEM, VIX proxy, DXY proxy.
-    """
-    cache_key = _get_cache_key()
+    # Try to get macro from simulation data
+    sim = _generate_price_history("3mo", "1d")
     indicators = {}
 
-    # SPY for market trend
-    spy = fetch_price_history("SPY", "3mo", "1d", cache_key)
-    if spy is not None and len(spy) > 1:
-        spy_now = spy["Close"].iloc[-1]
-        spy_1m = spy["Close"].iloc[-min(21, len(spy))]
-        spy_3m = spy["Close"].iloc[0]
-        indicators["spy"] = {
-            "current": round(float(spy_now), 2),
-            "change_1m": round(float((spy_now - spy_1m) / spy_1m * 100), 2),
-            "change_3m": round(float((spy_now - spy_3m) / spy_3m * 100), 2),
-            "trend": "Bullish" if spy_now > spy_1m else "Bearish",
-        }
+    def _trend(ticker, label):
+        if ticker in sim:
+            closes = sim[ticker]["close"]
+            if len(closes) > 21:
+                now_p = closes[-1]
+                m1 = closes[-min(21, len(closes))]
+                m3 = closes[0]
+                return {
+                    "current": round(now_p, 2),
+                    "change_1m": round((now_p - m1) / m1 * 100, 2),
+                    "change_3m": round((now_p - m3) / m3 * 100, 2),
+                }
+        return None
 
-    # TLT for rates
-    tlt = fetch_price_history("TLT", "3mo", "1d", cache_key)
-    if tlt is not None and len(tlt) > 1:
-        tlt_now = tlt["Close"].iloc[-1]
-        tlt_1m = tlt["Close"].iloc[-min(21, len(tlt))]
-        indicators["bonds"] = {
-            "current": round(float(tlt_now), 2),
-            "change_1m": round(float((tlt_now - tlt_1m) / tlt_1m * 100), 2),
-            "signal": "Rates Falling" if tlt_now > tlt_1m else "Rates Rising",
-        }
+    spy_data = _trend("SPY", "S&P 500")
+    if spy_data:
+        spy_data["trend"] = "Bullish" if spy_data["change_1m"] > 0 else "Bearish"
+        indicators["spy"] = spy_data
 
-    # GLD for safe haven
-    gld = fetch_price_history("GLD", "3mo", "1d", cache_key)
-    if gld is not None and len(gld) > 1:
-        gld_now = gld["Close"].iloc[-1]
-        gld_1m = gld["Close"].iloc[-min(21, len(gld))]
-        indicators["gold"] = {
-            "current": round(float(gld_now), 2),
-            "change_1m": round(float((gld_now - gld_1m) / gld_1m * 100), 2),
-            "demand": "Elevated" if gld_now > gld_1m * 1.02 else "Normal",
-        }
+    tlt_data = _trend("TLT", "Bonds")
+    if tlt_data:
+        tlt_data["signal"] = "Rates Falling" if tlt_data["change_1m"] > 0 else "Rates Rising"
+        indicators["bonds"] = tlt_data
 
-    # EEM for EM sentiment
-    eem = fetch_price_history("EEM", "3mo", "1d", cache_key)
-    if eem is not None and len(eem) > 1:
-        eem_now = eem["Close"].iloc[-1]
-        eem_1m = eem["Close"].iloc[-min(21, len(eem))]
-        indicators["em"] = {
-            "current": round(float(eem_now), 2),
-            "change_1m": round(float((eem_now - eem_1m) / eem_1m * 100), 2),
-            "trend": "Risk-On" if eem_now > eem_1m else "Risk-Off",
-        }
+    gld_data = _trend("GLD", "Gold")
+    if gld_data:
+        gld_data["demand"] = "Elevated" if gld_data["change_1m"] > 2 else "Normal"
+        indicators["gold"] = gld_data
 
-    # VIX for volatility
-    vix = fetch_price_history("^VIX", "3mo", "1d", cache_key)
-    if vix is not None and len(vix) > 1:
-        vix_now = vix["Close"].iloc[-1]
-        indicators["vix"] = {
-            "current": round(float(vix_now), 2),
-            "regime": "Low Vol" if vix_now < 15 else "Moderate" if vix_now < 25 else "High Vol",
-        }
+    eem_data = _trend("EEM", "EM")
+    if eem_data:
+        eem_data["trend"] = "Risk-On" if eem_data["change_1m"] > 0 else "Risk-Off"
+        indicators["em"] = eem_data
 
-    # USO for oil
-    uso = fetch_price_history("USO", "3mo", "1d", cache_key)
-    if uso is not None and len(uso) > 1:
-        uso_now = uso["Close"].iloc[-1]
-        uso_1m = uso["Close"].iloc[-min(21, len(uso))]
-        indicators["oil"] = {
-            "current": round(float(uso_now), 2),
-            "change_1m": round(float((uso_now - uso_1m) / uso_1m * 100), 2),
-        }
+    uso_data = _trend("USO", "Oil")
+    if uso_data:
+        indicators["oil"] = uso_data
+
+    # Synthetic VIX from SPY vol
+    if "SPY" in sim:
+        spy_closes = sim["SPY"]["close"]
+        if len(spy_closes) > 20:
+            rets = [(spy_closes[i] - spy_closes[i-1]) / spy_closes[i-1] for i in range(max(1, len(spy_closes)-20), len(spy_closes))]
+            daily_vol = (sum(r**2 for r in rets) / len(rets)) ** 0.5
+            vix_approx = daily_vol * math.sqrt(252) * 100
+            indicators["vix"] = {
+                "current": round(vix_approx, 1),
+                "regime": "Low Vol" if vix_approx < 15 else "Moderate" if vix_approx < 25 else "High Vol",
+            }
 
     # Overall regime
-    spy_trend = indicators.get("spy", {}).get("change_1m", 0)
-    vix_level = indicators.get("vix", {}).get("current", 20)
-    if spy_trend > 2 and vix_level < 20:
+    spy_1m = indicators.get("spy", {}).get("change_1m", 0)
+    vix = indicators.get("vix", {}).get("current", 20)
+    if spy_1m > 2 and vix < 20:
         regime = "Risk-On"
-    elif spy_trend < -2 or vix_level > 25:
+    elif spy_1m < -2 or vix > 25:
         regime = "Risk-Off"
     else:
         regime = "Neutral"
-
     indicators["regime"] = regime
+    indicators["source"] = "simulated"
 
     return jsonify(indicators)
 
 
 @app.route("/api/validate_ticker")
 def validate_ticker():
-    """Check if a ticker is valid and not excluded."""
     ticker = request.args.get("ticker", "").strip().upper()
     if ticker in EXCLUDED_TICKERS:
         return jsonify({"valid": False, "reason": "Excluded: defense/weapons sector"})
-    try:
-        t = yf.Ticker(ticker)
-        info = t.fast_info
-        if hasattr(info, 'last_price') and info.last_price:
-            return jsonify({"valid": True, "price": round(float(info.last_price), 2)})
-        return jsonify({"valid": False, "reason": "No price data available"})
-    except Exception:
-        return jsonify({"valid": False, "reason": "Ticker not found"})
+    if ticker in ASSET_UNIVERSE:
+        sim = _generate_price_history("1mo", "1d")
+        price = sim[ticker]["close"][-1] if ticker in sim else 0
+        return jsonify({"valid": True, "price": round(price, 2)})
+    return jsonify({"valid": False, "reason": "Not in universe"})
 
-
-# ============================================================
-# Serve static files
-# ============================================================
 
 @app.route("/<path:path>")
 def static_files(path):
@@ -285,7 +403,7 @@ def static_files(path):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"\n  Portfolio Trading Simulator")
-    print(f"  Running on http://localhost:{port}")
-    print(f"  Asset universe: {len(ASSET_UNIVERSE)} instruments")
-    print(f"  Excluded (defense): {len(EXCLUDED_TICKERS)} tickers\n")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    print(f"  http://localhost:{port}")
+    print(f"  {len(ASSET_UNIVERSE)} assets | {len(EXCLUDED_TICKERS)} excluded (defense)")
+    print(f"  Mode: Live (yfinance) with simulation fallback\n")
+    app.run(host="0.0.0.0", port=port, debug=False)
