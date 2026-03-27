@@ -383,6 +383,174 @@ def get_macro():
     return jsonify(indicators)
 
 
+@app.route("/api/reassess", methods=["POST"])
+def reassess():
+    """
+    Daily reassessment engine.
+    Takes current portfolio + macro, returns rebalance recommendation.
+    Implements PM decision framework:
+      1. Regime detection
+      2. Signal scoring
+      3. Allocation adjustment rules
+    """
+    data = request.get_json() or {}
+    current_portfolio = data.get("portfolio", [])
+    macro = json.loads(get_macro().get_data(as_text=True))
+
+    regime = macro.get("regime", "Neutral")
+    spy = macro.get("spy", {})
+    vix = macro.get("vix", {})
+    bonds = macro.get("bonds", {})
+    gold = macro.get("gold", {})
+    em = macro.get("em", {})
+    oil = macro.get("oil", {})
+
+    spy_1m = spy.get("change_1m", 0)
+    spy_3m = spy.get("change_3m", 0)
+    vix_level = vix.get("current", 20)
+    tlt_1m = bonds.get("change_1m", 0)
+    gld_1m = gold.get("change_1m", 0)
+    em_1m = em.get("change_1m", 0)
+    oil_1m = oil.get("change_1m", 0)
+
+    # --- Signal scoring ---
+    signals = []
+    triggers = []
+
+    # 1. Regime shift detection
+    if regime == "Risk-Off":
+        signals.append({"signal": "REGIME_RISK_OFF", "weight": -3,
+                        "reason": f"Market regime shifted to Risk-Off (SPY {spy_1m:+.1f}%, VIX {vix_level:.0f})"})
+        triggers.append("regime_shift")
+    elif regime == "Risk-On" and vix_level < 15:
+        signals.append({"signal": "REGIME_RISK_ON_LOW_VOL", "weight": 2,
+                        "reason": f"Strong Risk-On with low volatility (VIX {vix_level:.1f})"})
+
+    # 2. Volatility spike
+    if vix_level > 25:
+        signals.append({"signal": "VIX_SPIKE", "weight": -2,
+                        "reason": f"VIX elevated at {vix_level:.1f} — defensive positioning warranted"})
+        triggers.append("vix_spike")
+    elif vix_level > 30:
+        signals.append({"signal": "VIX_EXTREME", "weight": -4,
+                        "reason": f"VIX at {vix_level:.1f} — extreme fear, max defensive"})
+        triggers.append("vix_extreme")
+
+    # 3. Rate direction
+    if tlt_1m > 3:
+        signals.append({"signal": "RATES_FALLING_FAST", "weight": 1,
+                        "reason": f"Rates falling sharply (TLT {tlt_1m:+.1f}%) — favour growth + duration"})
+    elif tlt_1m < -3:
+        signals.append({"signal": "RATES_RISING_FAST", "weight": -1,
+                        "reason": f"Rates rising sharply (TLT {tlt_1m:+.1f}%) — reduce duration, favour value"})
+        triggers.append("rates_rising")
+
+    # 4. Gold breakout
+    if gld_1m > 5:
+        signals.append({"signal": "GOLD_BREAKOUT", "weight": 1,
+                        "reason": f"Gold surging {gld_1m:+.1f}% — increase safe haven allocation"})
+        triggers.append("gold_breakout")
+    elif gld_1m < -3:
+        signals.append({"signal": "GOLD_WEAKNESS", "weight": -1,
+                        "reason": f"Gold weak {gld_1m:+.1f}% — reduce gold allocation"})
+
+    # 5. EM divergence
+    if em_1m > 3 and spy_1m < em_1m:
+        signals.append({"signal": "EM_OUTPERFORM", "weight": 1,
+                        "reason": f"EM outperforming ({em_1m:+.1f}% vs SPY {spy_1m:+.1f}%) — increase EM"})
+    elif em_1m < -3:
+        signals.append({"signal": "EM_WEAKNESS", "weight": -1,
+                        "reason": f"EM under pressure ({em_1m:+.1f}%) — reduce EM exposure"})
+
+    # 6. SPY trend strength
+    if spy_1m > 5:
+        signals.append({"signal": "SPY_MOMENTUM", "weight": 1,
+                        "reason": f"Strong equity momentum (SPY {spy_1m:+.1f}% 1M)"})
+    elif spy_1m < -5:
+        signals.append({"signal": "SPY_SELLOFF", "weight": -3,
+                        "reason": f"Significant equity selloff (SPY {spy_1m:+.1f}% 1M)"})
+        triggers.append("equity_selloff")
+
+    # --- Aggregate score ---
+    total_score = sum(s["weight"] for s in signals)
+
+    # --- Generate recommended allocation ---
+    # Start from base allocation, adjust based on score
+    if total_score <= -4:
+        # Defensive: heavy bonds + gold, minimal equity
+        recommended = {
+            "GLD": 20, "TLT": 15, "BND": 15,
+            "AAPL": 10, "MSFT": 8, "SPY": 10,
+            "NVDA": 7, "AMZN": 5, "INDA": 5, "ICLN": 5,
+        }
+        stance = "Defensive"
+        rationale = "Multiple bearish signals triggered. Rotating to 50% safe haven (gold + bonds), reducing equity beta. Preserving capital is priority."
+    elif total_score <= -2:
+        # Cautious: increase hedges, trim risk
+        recommended = {
+            "NVDA": 12, "AAPL": 14, "MSFT": 12, "GLD": 15,
+            "AMZN": 8, "SPY": 8, "TLT": 10, "BND": 8,
+            "INDA": 7, "ICLN": 6,
+        }
+        stance = "Cautious"
+        rationale = "Bearish signals emerging. Increasing gold to 15% and bonds to 18%. Trimming NVDA from 18% to 12%. Maintaining quality tech names."
+    elif total_score >= 3:
+        # Aggressive: max equity, trim hedges
+        recommended = {
+            "NVDA": 22, "AAPL": 14, "MSFT": 13, "AMZN": 12,
+            "SPY": 10, "INDA": 10, "ICLN": 8, "GLD": 6,
+            "TLT": 3, "BND": 2,
+        }
+        stance = "Aggressive"
+        rationale = "Strong bullish confluence. Increasing NVDA to 22%, adding to AMZN and INDA. Trimming hedges to 11%. Maximum risk-on positioning."
+    elif total_score >= 1:
+        # Moderately bullish: slight tilt to risk
+        recommended = {
+            "NVDA": 20, "AAPL": 14, "MSFT": 12, "GLD": 10,
+            "AMZN": 11, "SPY": 9, "INDA": 8, "ICLN": 7,
+            "TLT": 5, "BND": 4,
+        }
+        stance = "Moderately Bullish"
+        rationale = "Positive signals outweigh risks. Increasing NVDA to 20% and AMZN to 11%. Slight trim to hedges. Maintaining core positioning."
+    else:
+        # Neutral: hold current base allocation
+        recommended = {
+            "NVDA": 18, "AAPL": 14, "MSFT": 12, "GLD": 12,
+            "AMZN": 10, "SPY": 8, "INDA": 8, "ICLN": 7,
+            "TLT": 6, "BND": 5,
+        }
+        stance = "Hold"
+        rationale = "No strong directional signals. Maintaining current allocation. Will reassess tomorrow."
+
+    # Check if rebalance is needed (allocation drift > 3% on any position)
+    should_rebalance = len(triggers) > 0
+    if not should_rebalance and current_portfolio:
+        current_allocs = {p.get("ticker"): p.get("allocation", 0) for p in current_portfolio}
+        for ticker, target in recommended.items():
+            current = current_allocs.get(ticker, 0)
+            if abs(current - target) > 3:
+                should_rebalance = True
+                triggers.append(f"drift_{ticker}")
+                break
+
+    return jsonify({
+        "date": datetime.utcnow().isoformat(),
+        "regime": regime,
+        "stance": stance,
+        "score": total_score,
+        "signals": signals,
+        "triggers": triggers,
+        "shouldRebalance": should_rebalance,
+        "recommended": recommended,
+        "rationale": rationale,
+        "macro_snapshot": {
+            "spy_1m": spy_1m, "vix": vix_level,
+            "tlt_1m": tlt_1m, "gld_1m": gld_1m,
+            "em_1m": em_1m, "oil_1m": oil_1m,
+        },
+    })
+
+
 @app.route("/api/validate_ticker")
 def validate_ticker():
     ticker = request.args.get("ticker", "").strip().upper()

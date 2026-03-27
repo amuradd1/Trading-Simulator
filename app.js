@@ -71,6 +71,7 @@
     renderAllocationChart();
     renderPositionsTable();
     renderMacroView();
+    await renderReassessment();
     renderKeyDrivers();
     await renderRiskMetrics();
     setupRebalanceForm();
@@ -392,6 +393,152 @@
     } catch (err) {
       container.innerHTML = '<div style="color:var(--red)">Failed to compute risk metrics</div>';
     }
+  }
+
+  // --- Daily Reassessment ---
+  async function renderReassessment() {
+    const container = $('#reassessment-content');
+    if (!container) return;
+
+    // Auto-run if needed today
+    let result;
+    if (Simulator.needsReassessment()) {
+      container.innerHTML = '<div style="color:var(--text-muted);padding:8px;">Running daily reassessment...</div>';
+      try {
+        result = await Simulator.runReassessment();
+      } catch (err) {
+        container.innerHTML = '<div style="color:var(--red)">Reassessment failed</div>';
+        return;
+      }
+    } else {
+      const history = Simulator.getReassessmentHistory();
+      result = history[0];
+    }
+
+    if (!result) {
+      container.innerHTML = '<div style="color:var(--text-muted)">No reassessment data</div>';
+      return;
+    }
+
+    // Stance badge color
+    const stanceColors = {
+      'Aggressive': 'pnl-positive',
+      'Moderately Bullish': 'pnl-positive',
+      'Hold': '',
+      'Cautious': 'pnl-negative',
+      'Defensive': 'pnl-negative',
+    };
+
+    const stanceBg = {
+      'Aggressive': 'var(--green-dim)',
+      'Moderately Bullish': 'var(--green-dim)',
+      'Hold': 'var(--blue-dim)',
+      'Cautious': 'var(--amber-dim)',
+      'Defensive': 'var(--red-dim)',
+    };
+
+    // Signals HTML
+    const signalsHtml = result.signals.map(s => {
+      const color = s.weight > 0 ? 'var(--green)' : s.weight < 0 ? 'var(--red)' : 'var(--text-muted)';
+      const sign = s.weight > 0 ? '+' : '';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin-bottom:4px;border-radius:4px;background:rgba(255,255,255,0.02);border:1px solid var(--border);">
+        <span style="font-size:0.8rem;">${s.reason}</span>
+        <span style="font-family:var(--font-mono);font-weight:700;color:${color};min-width:30px;text-align:right;">${sign}${s.weight}</span>
+      </div>`;
+    }).join('');
+
+    // Recommended allocation changes
+    const currentPositions = Simulator.getPositions();
+    const currentAllocs = {};
+    for (const p of currentPositions) currentAllocs[p.ticker] = Math.round(p.allocation);
+
+    const changesHtml = Object.entries(result.recommended)
+      .map(([ticker, target]) => {
+        const current = currentAllocs[ticker] || 0;
+        const diff = target - current;
+        if (Math.abs(diff) < 1) return '';
+        const color = diff > 0 ? 'var(--green)' : 'var(--red)';
+        const arrow = diff > 0 ? '&#9650;' : '&#9660;';
+        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;margin:2px;border-radius:4px;background:rgba(255,255,255,0.03);border:1px solid var(--border);font-size:0.78rem;">
+          <strong>${ticker}</strong>
+          <span style="color:var(--text-muted)">${current}%</span>
+          <span style="color:${color}">${arrow} ${target}%</span>
+        </span>`;
+      })
+      .filter(Boolean)
+      .join('');
+
+    const assessDate = new Date(result.date).toLocaleString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+
+    container.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="padding:5px 14px;border-radius:4px;font-weight:700;font-size:0.85rem;background:${stanceBg[result.stance] || 'var(--blue-dim)'}" class="${stanceColors[result.stance] || ''}">${result.stance}</span>
+          <span style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);">Score: ${result.score > 0 ? '+' : ''}${result.score}</span>
+          <span style="font-size:0.75rem;color:var(--text-muted);">${assessDate}</span>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" id="reassess-btn" style="font-size:0.75rem;padding:6px 14px;">Re-run Now</button>
+          ${result.shouldRebalance ? '<button class="btn btn-primary" id="apply-reassess-btn" style="font-size:0.75rem;padding:6px 14px;">Apply Recommendation</button>' : ''}
+        </div>
+      </div>
+
+      <div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:14px;line-height:1.6;padding:10px 14px;background:rgba(255,255,255,0.02);border-radius:6px;border:1px solid var(--border);">${result.rationale}</div>
+
+      ${result.signals.length ? `<div style="margin-bottom:14px;"><div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);margin-bottom:8px;">Signals (${result.signals.length})</div>${signalsHtml}</div>` : ''}
+
+      ${changesHtml ? `<div><div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);margin-bottom:8px;">Recommended Changes</div><div style="display:flex;flex-wrap:wrap;">${changesHtml}</div></div>` : '<div style="color:var(--text-muted);font-size:0.8rem;">No allocation changes recommended.</div>'}
+    `;
+
+    // Buttons
+    const reassessBtn = $('#reassess-btn');
+    if (reassessBtn) {
+      reassessBtn.onclick = async () => {
+        reassessBtn.disabled = true;
+        reassessBtn.textContent = 'Running...';
+        localStorage.removeItem("sim_last_reassessment");
+        await renderReassessment();
+      };
+    }
+
+    const applyBtn = $('#apply-reassess-btn');
+    if (applyBtn) {
+      applyBtn.onclick = async () => {
+        applyBtn.disabled = true;
+        applyBtn.textContent = 'Applying...';
+        await Simulator.rebalance(result.recommended);
+        await Simulator.refreshData();
+        await renderAll();
+      };
+    }
+
+    // Render history
+    renderReassessmentHistory();
+  }
+
+  function renderReassessmentHistory() {
+    const historyContainer = $('#reassessment-history');
+    if (!historyContainer) return;
+
+    const history = Simulator.getReassessmentHistory();
+    if (history.length <= 1) {
+      historyContainer.innerHTML = '<div style="color:var(--text-muted);font-size:0.8rem;">No prior assessments yet.</div>';
+      return;
+    }
+
+    historyContainer.innerHTML = history.slice(1, 8).map(h => {
+      const date = new Date(h.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const stanceColor = h.stance === 'Hold' ? 'var(--blue)' :
+        h.stance.includes('Bull') || h.stance === 'Aggressive' ? 'var(--green)' : 'var(--red)';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(30,37,51,0.5);font-size:0.78rem;">
+        <span style="color:var(--text-muted);">${date}</span>
+        <span style="color:${stanceColor};font-weight:600;">${h.stance}</span>
+        <span style="font-family:var(--font-mono);color:var(--text-muted);">Score: ${h.score > 0 ? '+' : ''}${h.score}</span>
+        <span style="color:var(--text-muted);">${h.shouldRebalance ? 'Rebalanced' : 'No change'}</span>
+      </div>`;
+    }).join('');
   }
 
   // --- Rebalance Form ---

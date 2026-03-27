@@ -315,6 +315,49 @@ const Simulator = (() => {
     };
   }
 
+  // --- Daily Reassessment ---
+  async function runReassessment() {
+    const positions = getPositions();
+    const portfolioPayload = positions.map(p => ({
+      ticker: p.ticker, allocation: p.allocation,
+    }));
+
+    const resp = await fetch("/api/reassess", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ portfolio: portfolioPayload }),
+    });
+    if (!resp.ok) throw new Error("Reassessment failed");
+    const result = await resp.json();
+
+    // Store in history
+    const history = getReassessmentHistory();
+    history.unshift(result);
+    if (history.length > 30) history.length = 30; // keep last 30 days
+    localStorage.setItem("sim_reassessment_history", JSON.stringify(history));
+    localStorage.setItem("sim_last_reassessment", result.date);
+
+    return result;
+  }
+
+  function getReassessmentHistory() {
+    try {
+      return JSON.parse(localStorage.getItem("sim_reassessment_history") || "[]");
+    } catch { return []; }
+  }
+
+  function getLastReassessmentDate() {
+    return localStorage.getItem("sim_last_reassessment") || null;
+  }
+
+  function needsReassessment() {
+    const last = getLastReassessmentDate();
+    if (!last) return true;
+    const lastDate = new Date(last).toDateString();
+    const today = new Date().toDateString();
+    return lastDate !== today;
+  }
+
   function getMacroData() { return macroData || {}; }
   function getDataSource() { return dataSource; }
 
@@ -344,6 +387,7 @@ const Simulator = (() => {
     rebalance, getRiskMetrics,
     getMacroData, getDataSource, getKeyDrivers,
     getUniverse, getPortfolio, resetPortfolio, fetchQuotes,
+    runReassessment, getReassessmentHistory, needsReassessment,
     INITIAL_CAPITAL, PERIODS,
   };
 })();
