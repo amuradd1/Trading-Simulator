@@ -16,17 +16,19 @@ const Simulator = (() => {
     "YTD":  { period: "ytd", interval: "1d",  label: "YTD" },
   };
 
+  // PM Allocation — high-conviction, macro-aligned
+  // Thesis: AI capex cycle + rate cuts + gold bid + India EM
   const DEFAULT_PORTFOLIO = [
-    { ticker: "AAPL",  allocation: 15 },
-    { ticker: "MSFT",  allocation: 12 },
-    { ticker: "NVDA",  allocation: 12 },
-    { ticker: "AMZN",  allocation: 8 },
-    { ticker: "GOOGL", allocation: 8 },
-    { ticker: "SPY",   allocation: 10 },
-    { ticker: "EEM",   allocation: 8 },
-    { ticker: "GLD",   allocation: 10 },
-    { ticker: "TLT",   allocation: 7 },
-    { ticker: "ICLN",  allocation: 10 },
+    { ticker: "NVDA",  allocation: 18 },  // Highest conviction: AI semiconductor demand inflecting
+    { ticker: "AAPL",  allocation: 14 },  // Cash flow fortress, services momentum, defensive mega-cap
+    { ticker: "MSFT",  allocation: 12 },  // Cloud + Copilot AI enterprise spend, margin expansion
+    { ticker: "GLD",   allocation: 12 },  // Safe haven elevated, central bank buying, rates falling
+    { ticker: "AMZN",  allocation: 10 },  // AWS reacceleration + retail margin underappreciated
+    { ticker: "SPY",   allocation: 8 },   // Core beta, regime is Risk-On low vol
+    { ticker: "INDA",  allocation: 8 },   // Best structural EM: domestic demand + mfg shift
+    { ticker: "ICLN",  allocation: 7 },   // Policy tailwinds, underowned, mean-reverting
+    { ticker: "TLT",   allocation: 6 },   // Duration hedge, rates falling signal
+    { ticker: "BND",   allocation: 5 },   // Cash proxy with yield — dry powder for rebalance
   ];
 
   // State
