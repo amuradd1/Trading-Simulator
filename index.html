@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portfolio Trading Simulator</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-left">
+      <div class="header-logo"><span>SIM</span>FOLIO</div>
+      <span class="header-badge">Live Data</span>
+      <span class="ethical-badge">ESG Screened — No Defense</span>
+      <span id="regime-badge" class="regime-badge neutral">Loading</span>
+    </div>
+    <div class="header-stats">
+      <div class="stat-item">
+        <div class="stat-label">Initial Capital</div>
+        <div class="stat-value" id="initial-capital">$1,000.00</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Portfolio Value</div>
+        <div id="total-value" class="stat-value">—</div>
+        <div id="total-pnl" class="stat-sub">—</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Loading State -->
+  <div id="app-loader" style="text-align:center;padding:60px;color:var(--text-muted);">
+    Loading market data from Yahoo Finance...
+  </div>
+
+  <main class="main" id="app-main" style="display:none;">
+
+    <!-- Returns Strip -->
+    <section class="card full-width">
+      <div class="card-title">Period Returns</div>
+      <div class="returns-grid" id="returns-grid"></div>
+    </section>
+
+    <!-- Allocation Chart -->
+    <section class="card">
+      <div class="card-title">Portfolio Allocation</div>
+      <div class="chart-container-pie">
+        <canvas id="allocation-canvas"></canvas>
+      </div>
+    </section>
+
+    <!-- Performance Chart -->
+    <section class="card">
+      <div class="card-title">Performance</div>
+      <div class="chart-container">
+        <canvas id="performance-canvas"></canvas>
+      </div>
+    </section>
+
+    <!-- Positions Table -->
+    <section class="card full-width">
+      <div class="card-title">Positions</div>
+      <div style="overflow-x: auto;">
+        <table class="positions-table">
+          <thead>
+            <tr>
+              <th>Asset</th>
+              <th>Ticker</th>
+              <th class="right">Sector</th>
+              <th class="right">Category</th>
+              <th class="right">Price</th>
+              <th class="right">Shares</th>
+              <th class="right">Value</th>
+              <th class="right">P&amp;L</th>
+              <th class="right">P&amp;L %</th>
+              <th class="right">Alloc %</th>
+            </tr>
+          </thead>
+          <tbody id="positions-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Macro Environment (Real Data) -->
+    <section class="card full-width">
+      <div class="card-title">Macro &amp; Sentiment Dashboard (Live)</div>
+      <div class="sentiment-grid" id="macro-content"></div>
+    </section>
+
+    <!-- Key Drivers -->
+    <section class="card full-width">
+      <div class="card-title">Key P&amp;L Drivers</div>
+      <div class="drivers-columns">
+        <div>
+          <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--green);margin-bottom:8px;">Top Contributors</div>
+          <div id="contributors"></div>
+        </div>
+        <div>
+          <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--red);margin-bottom:8px;">Top Detractors</div>
+          <div id="detractors"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Risk Metrics -->
+    <section class="card full-width">
+      <div class="card-title">Risk Analytics</div>
+      <div class="metrics-grid" id="risk-metrics"></div>
+    </section>
+
+    <!-- Rebalance -->
+    <section class="card full-width">
+      <div class="card-title">Rebalance Portfolio</div>
+      <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:12px;">Select up to 10 assets from the full universe. Allocations must total 100%. Defense stocks are excluded.</p>
+      <div class="rebalance-grid" id="rebalance-grid"></div>
+      <div class="rebalance-footer">
+        <div id="rebalance-total" class="rebalance-total">Total: 100%</div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" id="reset-btn">Reset to Default</button>
+          <button class="btn btn-secondary" id="normalize-btn">Normalize to 100%</button>
+          <button class="btn btn-primary" id="rebalance-btn">Apply Rebalance</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
