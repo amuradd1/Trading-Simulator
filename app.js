@@ -437,13 +437,40 @@
       'Defensive': 'var(--red-dim)',
     };
 
-    // Signals HTML
-    const signalsHtml = result.signals.map(s => {
-      const color = s.weight > 0 ? 'var(--green)' : s.weight < 0 ? 'var(--red)' : 'var(--text-muted)';
-      const sign = s.weight > 0 ? '+' : '';
-      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin-bottom:4px;border-radius:4px;background:rgba(255,255,255,0.02);border:1px solid var(--border);">
-        <span style="font-size:0.8rem;">${s.reason}</span>
-        <span style="font-family:var(--font-mono);font-weight:700;color:${color};min-width:30px;text-align:right;">${sign}${s.weight}</span>
+    // Group signals by category
+    const macroSignals = (result.signals || []).filter(s => s.category !== 'Micro');
+    const microSignals = (result.signals || []).filter(s => s.category === 'Micro');
+
+    function renderSignalList(signals) {
+      return signals.map(s => {
+        const color = s.weight > 0 ? 'var(--green)' : s.weight < 0 ? 'var(--red)' : 'var(--text-muted)';
+        const sign = s.weight > 0 ? '+' : '';
+        const catColor = s.category === 'Regime' ? 'var(--blue)' : s.category === 'Credit' ? 'var(--amber)' :
+          s.category === 'Inflation' ? 'var(--red)' : 'var(--text-muted)';
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin-bottom:4px;border-radius:4px;background:rgba(255,255,255,0.02);border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:0.6rem;text-transform:uppercase;letter-spacing:0.5px;color:${catColor};min-width:65px;">${s.category}</span>
+            <span style="font-size:0.8rem;">${s.detail || s.reason || ''}</span>
+          </div>
+          <span style="font-family:var(--font-mono);font-weight:700;color:${color};min-width:30px;text-align:right;">${sign}${s.weight}</span>
+        </div>`;
+      }).join('');
+    }
+
+    const macroSignalsHtml = renderSignalList(macroSignals);
+    const microSignalsHtml = renderSignalList(microSignals);
+
+    // Position scores table
+    const posScores = result.positionScores || {};
+    const posScoresHtml = Object.entries(posScores).map(([ticker, ps]) => {
+      const scoreColor = ps.score > 0 ? 'var(--green)' : ps.score < 0 ? 'var(--red)' : 'var(--text-muted)';
+      const rsColor = ps.relative_strength > 0 ? 'var(--green)' : ps.relative_strength < 0 ? 'var(--red)' : 'var(--text-muted)';
+      return `<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;margin:2px;border-radius:4px;background:rgba(255,255,255,0.02);border:1px solid var(--border);font-size:0.78rem;">
+        <strong>${ticker}</strong>
+        <span style="color:${scoreColor};font-family:var(--font-mono);">${ps.score > 0 ? '+' : ''}${ps.score}</span>
+        <span style="color:var(--text-muted);font-size:0.68rem;">RS:${ps.relative_strength > 0 ? '+' : ''}${ps.relative_strength}</span>
+        <span style="color:var(--text-muted);font-size:0.68rem;">Mom:${ps.momentum > 0 ? '+' : ''}${ps.momentum}</span>
+        <span style="color:var(--text-muted);font-size:0.68rem;">Vol:${ps.volatility}%</span>
       </div>`;
     }).join('');
 
@@ -472,11 +499,16 @@
       month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit'
     });
 
+    const macroScoreDisplay = result.macroScore !== undefined ? result.macroScore : '?';
+    const microScoreDisplay = result.microScore !== undefined ? result.microScore : '?';
+
     container.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
-        <div style="display:flex;align-items:center;gap:10px;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
           <span style="padding:5px 14px;border-radius:4px;font-weight:700;font-size:0.85rem;background:${stanceBg[result.stance] || 'var(--blue-dim)'}" class="${stanceColors[result.stance] || ''}">${result.stance}</span>
-          <span style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);">Score: ${result.score > 0 ? '+' : ''}${result.score}</span>
+          <span style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);">Total: ${result.score > 0 ? '+' : ''}${result.score}</span>
+          <span style="font-family:var(--font-mono);font-size:0.72rem;padding:2px 6px;border-radius:3px;background:var(--blue-dim);color:var(--blue);">Macro ${macroScoreDisplay > 0 ? '+' : ''}${macroScoreDisplay}</span>
+          <span style="font-family:var(--font-mono);font-size:0.72rem;padding:2px 6px;border-radius:3px;background:rgba(170,0,255,0.15);color:var(--purple);">Micro ${microScoreDisplay > 0 ? '+' : ''}${microScoreDisplay}</span>
           <span style="font-size:0.75rem;color:var(--text-muted);">${assessDate}</span>
         </div>
         <div style="display:flex;gap:8px;">
@@ -487,9 +519,15 @@
 
       <div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:14px;line-height:1.6;padding:10px 14px;background:rgba(255,255,255,0.02);border-radius:6px;border:1px solid var(--border);">${result.rationale}</div>
 
-      ${result.signals.length ? `<div style="margin-bottom:14px;"><div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);margin-bottom:8px;">Signals (${result.signals.length})</div>${signalsHtml}</div>` : ''}
+      ${macroSignals.length ? `<div style="margin-bottom:14px;"><div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--blue);margin-bottom:8px;">Macro Signals (${macroSignals.length})</div>${macroSignalsHtml}</div>` : '<div style="color:var(--text-muted);font-size:0.8rem;margin-bottom:14px;">No macro signals triggered.</div>'}
+
+      ${posScoresHtml ? `<div style="margin-bottom:14px;"><div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--purple);margin-bottom:8px;">Position Micro Scores</div><div style="display:flex;flex-wrap:wrap;">${posScoresHtml}</div></div>` : ''}
+
+      ${microSignals.length ? `<div style="margin-bottom:14px;"><div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--purple);margin-bottom:8px;">Micro Signals (${microSignals.length})</div>${microSignalsHtml}</div>` : ''}
 
       ${changesHtml ? `<div><div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);margin-bottom:8px;">Recommended Changes</div><div style="display:flex;flex-wrap:wrap;">${changesHtml}</div></div>` : '<div style="color:var(--text-muted);font-size:0.8rem;">No allocation changes recommended.</div>'}
+
+      ${result.adjustments && result.adjustments.length ? `<div style="margin-top:10px;font-size:0.72rem;color:var(--text-muted);">Micro tilts: ${result.adjustments.join(', ')}</div>` : ''}
     `;
 
     // Buttons

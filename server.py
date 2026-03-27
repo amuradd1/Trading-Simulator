@@ -386,143 +386,332 @@ def get_macro():
 @app.route("/api/reassess", methods=["POST"])
 def reassess():
     """
-    Daily reassessment engine.
-    Takes current portfolio + macro, returns rebalance recommendation.
-    Implements PM decision framework:
-      1. Regime detection
-      2. Signal scoring
-      3. Allocation adjustment rules
+    Daily reassessment engine — full macro + micro framework.
+    Scans: regime, rates, inflation, credit, breadth, USD, commodities,
+           geopolitics proxy, plus micro (relative strength, momentum, sector rotation).
     """
     data = request.get_json() or {}
     current_portfolio = data.get("portfolio", [])
-    macro = json.loads(get_macro().get_data(as_text=True))
 
-    regime = macro.get("regime", "Neutral")
-    spy = macro.get("spy", {})
-    vix = macro.get("vix", {})
-    bonds = macro.get("bonds", {})
-    gold = macro.get("gold", {})
-    em = macro.get("em", {})
-    oil = macro.get("oil", {})
+    # Fetch all price data we need
+    sim_3m = _generate_price_history("3mo", "1d")
+    sim_1y = _generate_price_history("1y", "1d")
 
-    spy_1m = spy.get("change_1m", 0)
-    spy_3m = spy.get("change_3m", 0)
-    vix_level = vix.get("current", 20)
-    tlt_1m = bonds.get("change_1m", 0)
-    gld_1m = gold.get("change_1m", 0)
-    em_1m = em.get("change_1m", 0)
-    oil_1m = oil.get("change_1m", 0)
-
-    # --- Signal scoring ---
-    signals = []
-    triggers = []
-
-    # 1. Regime shift detection
-    if regime == "Risk-Off":
-        signals.append({"signal": "REGIME_RISK_OFF", "weight": -3,
-                        "reason": f"Market regime shifted to Risk-Off (SPY {spy_1m:+.1f}%, VIX {vix_level:.0f})"})
-        triggers.append("regime_shift")
-    elif regime == "Risk-On" and vix_level < 15:
-        signals.append({"signal": "REGIME_RISK_ON_LOW_VOL", "weight": 2,
-                        "reason": f"Strong Risk-On with low volatility (VIX {vix_level:.1f})"})
-
-    # 2. Volatility spike
-    if vix_level > 25:
-        signals.append({"signal": "VIX_SPIKE", "weight": -2,
-                        "reason": f"VIX elevated at {vix_level:.1f} — defensive positioning warranted"})
-        triggers.append("vix_spike")
-    elif vix_level > 30:
-        signals.append({"signal": "VIX_EXTREME", "weight": -4,
-                        "reason": f"VIX at {vix_level:.1f} — extreme fear, max defensive"})
-        triggers.append("vix_extreme")
-
-    # 3. Rate direction
-    if tlt_1m > 3:
-        signals.append({"signal": "RATES_FALLING_FAST", "weight": 1,
-                        "reason": f"Rates falling sharply (TLT {tlt_1m:+.1f}%) — favour growth + duration"})
-    elif tlt_1m < -3:
-        signals.append({"signal": "RATES_RISING_FAST", "weight": -1,
-                        "reason": f"Rates rising sharply (TLT {tlt_1m:+.1f}%) — reduce duration, favour value"})
-        triggers.append("rates_rising")
-
-    # 4. Gold breakout
-    if gld_1m > 5:
-        signals.append({"signal": "GOLD_BREAKOUT", "weight": 1,
-                        "reason": f"Gold surging {gld_1m:+.1f}% — increase safe haven allocation"})
-        triggers.append("gold_breakout")
-    elif gld_1m < -3:
-        signals.append({"signal": "GOLD_WEAKNESS", "weight": -1,
-                        "reason": f"Gold weak {gld_1m:+.1f}% — reduce gold allocation"})
-
-    # 5. EM divergence
-    if em_1m > 3 and spy_1m < em_1m:
-        signals.append({"signal": "EM_OUTPERFORM", "weight": 1,
-                        "reason": f"EM outperforming ({em_1m:+.1f}% vs SPY {spy_1m:+.1f}%) — increase EM"})
-    elif em_1m < -3:
-        signals.append({"signal": "EM_WEAKNESS", "weight": -1,
-                        "reason": f"EM under pressure ({em_1m:+.1f}%) — reduce EM exposure"})
-
-    # 6. SPY trend strength
-    if spy_1m > 5:
-        signals.append({"signal": "SPY_MOMENTUM", "weight": 1,
-                        "reason": f"Strong equity momentum (SPY {spy_1m:+.1f}% 1M)"})
-    elif spy_1m < -5:
-        signals.append({"signal": "SPY_SELLOFF", "weight": -3,
-                        "reason": f"Significant equity selloff (SPY {spy_1m:+.1f}% 1M)"})
-        triggers.append("equity_selloff")
-
-    # --- Aggregate score ---
-    total_score = sum(s["weight"] for s in signals)
-
-    # --- Generate recommended allocation ---
-    # Start from base allocation, adjust based on score
-    if total_score <= -4:
-        # Defensive: heavy bonds + gold, minimal equity
-        recommended = {
-            "GLD": 20, "TLT": 15, "BND": 15,
-            "AAPL": 10, "MSFT": 8, "SPY": 10,
-            "NVDA": 7, "AMZN": 5, "INDA": 5, "ICLN": 5,
+    def _get(ticker, sim, lookback=21):
+        """Get current price and % changes at multiple lookbacks."""
+        if ticker not in sim:
+            return {"current": 0, "chg_1w": 0, "chg_1m": 0, "chg_3m": 0}
+        closes = sim[ticker]["close"]
+        n = len(closes)
+        now = closes[-1] if n > 0 else 0
+        w1 = closes[max(0, n - 5)] if n > 5 else now
+        m1 = closes[max(0, n - 21)] if n > 21 else now
+        m3 = closes[0]
+        return {
+            "current": round(now, 2),
+            "chg_1w": round((now - w1) / w1 * 100, 2) if w1 else 0,
+            "chg_1m": round((now - m1) / m1 * 100, 2) if m1 else 0,
+            "chg_3m": round((now - m3) / m3 * 100, 2) if m3 else 0,
         }
+
+    def _relative_strength(ticker, benchmark="SPY"):
+        """Relative performance of ticker vs benchmark over 1M."""
+        t = _get(ticker, sim_3m)
+        b = _get(benchmark, sim_3m)
+        return round(t["chg_1m"] - b["chg_1m"], 2)
+
+    def _momentum_score(ticker):
+        """Price momentum: weighted avg of 1w, 1m, 3m returns."""
+        d = _get(ticker, sim_3m)
+        return round(d["chg_1w"] * 0.5 + d["chg_1m"] * 0.3 + d["chg_3m"] * 0.2, 2)
+
+    def _volatility(ticker, lookback=20):
+        """Realized daily vol (annualized) from last N closes."""
+        if ticker not in sim_3m:
+            return 0
+        closes = sim_3m[ticker]["close"]
+        n = len(closes)
+        if n < lookback + 1:
+            return 0
+        rets = [(closes[i] - closes[i-1]) / closes[i-1]
+                for i in range(max(1, n - lookback), n) if closes[i-1] > 0]
+        if not rets:
+            return 0
+        variance = sum(r**2 for r in rets) / len(rets)
+        return round(math.sqrt(variance) * math.sqrt(252) * 100, 1)
+
+    # ================================================================
+    # MACRO SCAN
+    # ================================================================
+    macro_signals = []
+
+    # 1. Equity market regime (SPY)
+    spy = _get("SPY", sim_3m)
+    spy_vol = _volatility("SPY")
+    vix_approx = spy_vol  # our VIX proxy
+
+    if spy["chg_1m"] > 5 and vix_approx < 15:
+        macro_signals.append({"category": "Regime", "signal": "STRONG_RISK_ON", "weight": 3,
+                              "detail": f"SPY +{spy['chg_1m']:.1f}% 1M with VIX at {vix_approx:.0f} — strong bullish regime"})
+    elif spy["chg_1m"] > 2 and vix_approx < 20:
+        macro_signals.append({"category": "Regime", "signal": "RISK_ON", "weight": 2,
+                              "detail": f"SPY +{spy['chg_1m']:.1f}% 1M, VIX {vix_approx:.0f} — constructive"})
+    elif spy["chg_1m"] < -5 or vix_approx > 30:
+        macro_signals.append({"category": "Regime", "signal": "RISK_OFF_SEVERE", "weight": -4,
+                              "detail": f"SPY {spy['chg_1m']:+.1f}% 1M, VIX {vix_approx:.0f} — severe risk-off"})
+    elif spy["chg_1m"] < -2 or vix_approx > 25:
+        macro_signals.append({"category": "Regime", "signal": "RISK_OFF", "weight": -2,
+                              "detail": f"SPY {spy['chg_1m']:+.1f}% 1M, VIX {vix_approx:.0f} — risk-off"})
+
+    # 2. Interest rates / yield curve (TLT = long duration, BND = broad)
+    tlt = _get("TLT", sim_3m)
+    bnd = _get("BND", sim_3m)
+    # TLT vs BND spread = yield curve proxy (TLT rising faster = curve flattening/inversion)
+    curve_signal = tlt["chg_1m"] - bnd["chg_1m"]
+
+    if tlt["chg_1m"] > 4:
+        macro_signals.append({"category": "Rates", "signal": "RATES_PLUNGING", "weight": 2,
+                              "detail": f"TLT +{tlt['chg_1m']:.1f}% — rates falling sharply, favours growth + duration"})
+    elif tlt["chg_1m"] > 2:
+        macro_signals.append({"category": "Rates", "signal": "RATES_FALLING", "weight": 1,
+                              "detail": f"TLT +{tlt['chg_1m']:.1f}% — rates declining, supportive for equities"})
+    elif tlt["chg_1m"] < -4:
+        macro_signals.append({"category": "Rates", "signal": "RATES_SPIKING", "weight": -3,
+                              "detail": f"TLT {tlt['chg_1m']:+.1f}% — rates spiking, headwind for growth/duration"})
+    elif tlt["chg_1m"] < -2:
+        macro_signals.append({"category": "Rates", "signal": "RATES_RISING", "weight": -1,
+                              "detail": f"TLT {tlt['chg_1m']:+.1f}% — rates rising, watch duration exposure"})
+
+    if abs(curve_signal) > 3:
+        direction = "flattening" if curve_signal > 0 else "steepening"
+        macro_signals.append({"category": "Yield Curve", "signal": f"CURVE_{direction.upper()}", "weight": -1 if curve_signal > 3 else 1,
+                              "detail": f"Yield curve {direction} (TLT-BND spread {curve_signal:+.1f}pp)"})
+
+    # 3. Inflation proxy (commodities basket: GLD + SLV + USO + DBA)
+    gld = _get("GLD", sim_3m)
+    slv = _get("SLV", sim_3m)
+    uso = _get("USO", sim_3m)
+    dba = _get("DBA", sim_3m)
+    commodity_avg_1m = (gld["chg_1m"] + slv["chg_1m"] + uso["chg_1m"] + dba["chg_1m"]) / 4
+
+    if commodity_avg_1m > 5:
+        macro_signals.append({"category": "Inflation", "signal": "INFLATION_SURGE", "weight": -2,
+                              "detail": f"Commodity basket +{commodity_avg_1m:.1f}% 1M — inflation pressures building, headwind for bonds + growth"})
+    elif commodity_avg_1m > 2:
+        macro_signals.append({"category": "Inflation", "signal": "INFLATION_RISING", "weight": -1,
+                              "detail": f"Commodities firming +{commodity_avg_1m:.1f}% 1M — mild inflation signal"})
+    elif commodity_avg_1m < -3:
+        macro_signals.append({"category": "Inflation", "signal": "DEFLATION_RISK", "weight": 1,
+                              "detail": f"Commodities falling {commodity_avg_1m:+.1f}% 1M — disinflationary, supports rate cuts"})
+
+    # 4. Credit stress (HYG vs BND spread = credit risk appetite)
+    hyg = _get("HYG", sim_3m)
+    credit_spread = hyg["chg_1m"] - bnd["chg_1m"]
+
+    if credit_spread < -3:
+        macro_signals.append({"category": "Credit", "signal": "CREDIT_STRESS", "weight": -2,
+                              "detail": f"HY underperforming IG by {credit_spread:+.1f}pp — credit stress widening"})
+    elif credit_spread > 2:
+        macro_signals.append({"category": "Credit", "signal": "CREDIT_HEALTHY", "weight": 1,
+                              "detail": f"HY outperforming IG by +{credit_spread:.1f}pp — healthy risk appetite"})
+
+    # 5. USD strength proxy (EM underperformance = strong USD)
+    eem = _get("EEM", sim_3m)
+    efa = _get("EFA", sim_3m)
+    usd_proxy = -(eem["chg_1m"] + efa["chg_1m"]) / 2  # inverse: weak intl = strong USD
+
+    if usd_proxy > 3:
+        macro_signals.append({"category": "USD", "signal": "USD_STRONG", "weight": -1,
+                              "detail": f"USD strengthening (intl avg {-usd_proxy:+.1f}%) — headwind for EM + commodities"})
+    elif usd_proxy < -3:
+        macro_signals.append({"category": "USD", "signal": "USD_WEAK", "weight": 1,
+                              "detail": f"USD weakening (intl avg +{-usd_proxy:.1f}%) — tailwind for EM + commodities"})
+
+    # 6. Safe haven demand (GLD relative to SPY)
+    safe_haven_spread = gld["chg_1m"] - spy["chg_1m"]
+    if safe_haven_spread > 5:
+        macro_signals.append({"category": "Safe Haven", "signal": "FLIGHT_TO_SAFETY", "weight": -2,
+                              "detail": f"Gold outperforming SPY by +{safe_haven_spread:.1f}pp — flight to safety underway"})
+    elif safe_haven_spread > 3:
+        macro_signals.append({"category": "Safe Haven", "signal": "SAFE_HAVEN_BID", "weight": -1,
+                              "detail": f"Gold bid relative to equities (+{safe_haven_spread:.1f}pp) — caution warranted"})
+
+    # 7. Market breadth proxy (IWM vs SPY = small cap participation)
+    iwm = _get("IWM", sim_3m)
+    breadth_spread = iwm["chg_1m"] - spy["chg_1m"]
+
+    if breadth_spread > 3:
+        macro_signals.append({"category": "Breadth", "signal": "BROAD_PARTICIPATION", "weight": 1,
+                              "detail": f"Small caps outperforming large (+{breadth_spread:.1f}pp) — healthy breadth"})
+    elif breadth_spread < -3:
+        macro_signals.append({"category": "Breadth", "signal": "NARROW_LEADERSHIP", "weight": -1,
+                              "detail": f"Small caps lagging ({breadth_spread:+.1f}pp) — narrow leadership, fragile rally"})
+
+    # 8. Geopolitical stress proxy (Gold + Oil up together while equities flat/down)
+    if gld["chg_1m"] > 2 and uso["chg_1m"] > 2 and spy["chg_1m"] < 1:
+        macro_signals.append({"category": "Geopolitical", "signal": "GEO_RISK_ELEVATED", "weight": -1,
+                              "detail": f"Gold +{gld['chg_1m']:.1f}% and Oil +{uso['chg_1m']:.1f}% while SPY flat — geopolitical risk priced in"})
+
+    # 9. Sector rotation (QQQ vs SPY = growth vs value)
+    qqq = _get("QQQ", sim_3m)
+    growth_vs_value = qqq["chg_1m"] - spy["chg_1m"]
+
+    if growth_vs_value > 3:
+        macro_signals.append({"category": "Rotation", "signal": "GROWTH_LEADING", "weight": 1,
+                              "detail": f"Growth outperforming value by +{growth_vs_value:.1f}pp — risk appetite for tech"})
+    elif growth_vs_value < -3:
+        macro_signals.append({"category": "Rotation", "signal": "VALUE_ROTATION", "weight": -1,
+                              "detail": f"Value outperforming growth by +{-growth_vs_value:.1f}pp — rotation away from tech"})
+
+    # ================================================================
+    # MICRO SCAN (for each held position)
+    # ================================================================
+    micro_signals = []
+    position_scores = {}
+
+    held_tickers = [p.get("ticker") for p in current_portfolio if p.get("ticker")]
+    if not held_tickers:
+        held_tickers = ["NVDA", "AAPL", "MSFT", "GLD", "AMZN", "SPY", "INDA", "ICLN", "TLT", "BND"]
+
+    for ticker in held_tickers:
+        if ticker not in ASSET_UNIVERSE:
+            continue
+        asset = ASSET_UNIVERSE[ticker]
+        d = _get(ticker, sim_3m)
+        rs = _relative_strength(ticker)
+        mom = _momentum_score(ticker)
+        vol = _volatility(ticker)
+
+        score = 0
+        reasons = []
+
+        # Relative strength
+        if rs > 3:
+            score += 2
+            reasons.append(f"RS +{rs:.1f}pp vs SPY")
+        elif rs > 1:
+            score += 1
+            reasons.append(f"RS +{rs:.1f}pp vs SPY")
+        elif rs < -3:
+            score -= 2
+            reasons.append(f"RS {rs:+.1f}pp vs SPY")
+        elif rs < -1:
+            score -= 1
+            reasons.append(f"RS {rs:+.1f}pp vs SPY")
+
+        # Momentum
+        if mom > 3:
+            score += 1
+            reasons.append(f"Strong momentum ({mom:+.1f})")
+        elif mom < -3:
+            score -= 1
+            reasons.append(f"Weak momentum ({mom:+.1f})")
+
+        # Volatility vs sector norm
+        expected_vol = asset.get("annualVol", 0.25) * 100
+        vol_ratio = vol / expected_vol if expected_vol > 0 else 1
+        if vol_ratio > 1.5:
+            score -= 1
+            reasons.append(f"Vol elevated ({vol:.0f}% vs {expected_vol:.0f}% norm)")
+
+        # Trend: 1w vs 1m alignment
+        if d["chg_1w"] > 0 and d["chg_1m"] > 0:
+            score += 1
+            reasons.append("Trend aligned (both positive)")
+        elif d["chg_1w"] < 0 and d["chg_1m"] < 0:
+            score -= 1
+            reasons.append("Trend aligned (both negative)")
+        elif d["chg_1w"] > 1 and d["chg_1m"] < -1:
+            reasons.append("Reversal signal (1W up, 1M down)")
+
+        position_scores[ticker] = {
+            "score": score,
+            "reasons": reasons,
+            "relative_strength": rs,
+            "momentum": mom,
+            "volatility": vol,
+            "chg_1w": d["chg_1w"],
+            "chg_1m": d["chg_1m"],
+        }
+
+        # Surface strong micro signals
+        if score >= 3:
+            micro_signals.append({"category": "Micro", "signal": f"{ticker}_STRONG",
+                                  "weight": 1, "detail": f"{ticker}: strong micro ({', '.join(reasons[:2])})"})
+        elif score <= -3:
+            micro_signals.append({"category": "Micro", "signal": f"{ticker}_WEAK",
+                                  "weight": -1, "detail": f"{ticker}: weak micro ({', '.join(reasons[:2])})"})
+
+    # ================================================================
+    # AGGREGATE SCORING
+    # ================================================================
+    all_signals = macro_signals + micro_signals
+    macro_score = sum(s["weight"] for s in macro_signals)
+    micro_score = sum(s["weight"] for s in micro_signals)
+    total_score = macro_score + micro_score
+
+    # ================================================================
+    # ALLOCATION DECISION
+    # ================================================================
+    # Base allocation, then adjust positions based on micro scores
+    if total_score <= -5:
+        base = {"GLD": 22, "TLT": 16, "BND": 14, "AAPL": 10, "MSFT": 8, "SPY": 10,
+                "NVDA": 6, "AMZN": 5, "INDA": 4, "ICLN": 5}
         stance = "Defensive"
-        rationale = "Multiple bearish signals triggered. Rotating to 50% safe haven (gold + bonds), reducing equity beta. Preserving capital is priority."
+        rationale = f"Severe bearish confluence ({len([s for s in all_signals if s['weight'] < 0])} negative signals). Rotating to 52% safe haven. Cutting NVDA to 6%. Capital preservation mode."
     elif total_score <= -2:
-        # Cautious: increase hedges, trim risk
-        recommended = {
-            "NVDA": 12, "AAPL": 14, "MSFT": 12, "GLD": 15,
-            "AMZN": 8, "SPY": 8, "TLT": 10, "BND": 8,
-            "INDA": 7, "ICLN": 6,
-        }
+        base = {"NVDA": 12, "AAPL": 13, "MSFT": 12, "GLD": 16, "AMZN": 8, "SPY": 8,
+                "TLT": 11, "BND": 8, "INDA": 6, "ICLN": 6}
         stance = "Cautious"
-        rationale = "Bearish signals emerging. Increasing gold to 15% and bonds to 18%. Trimming NVDA from 18% to 12%. Maintaining quality tech names."
-    elif total_score >= 3:
-        # Aggressive: max equity, trim hedges
-        recommended = {
-            "NVDA": 22, "AAPL": 14, "MSFT": 13, "AMZN": 12,
-            "SPY": 10, "INDA": 10, "ICLN": 8, "GLD": 6,
-            "TLT": 3, "BND": 2,
-        }
+        rationale = f"Bearish signals outweigh bullish (macro {macro_score:+d}, micro {micro_score:+d}). Increasing hedges to 35%. Trimming high-beta. Maintaining quality."
+    elif total_score >= 5:
+        base = {"NVDA": 23, "AAPL": 14, "MSFT": 13, "AMZN": 13, "SPY": 10, "INDA": 10,
+                "ICLN": 8, "GLD": 5, "TLT": 2, "BND": 2}
         stance = "Aggressive"
-        rationale = "Strong bullish confluence. Increasing NVDA to 22%, adding to AMZN and INDA. Trimming hedges to 11%. Maximum risk-on positioning."
-    elif total_score >= 1:
-        # Moderately bullish: slight tilt to risk
-        recommended = {
-            "NVDA": 20, "AAPL": 14, "MSFT": 12, "GLD": 10,
-            "AMZN": 11, "SPY": 9, "INDA": 8, "ICLN": 7,
-            "TLT": 5, "BND": 4,
-        }
+        rationale = f"Strong bullish confluence (macro {macro_score:+d}, micro {micro_score:+d}). Max equity at 91%. NVDA 23% as top conviction. Minimal hedges."
+    elif total_score >= 2:
+        base = {"NVDA": 20, "AAPL": 14, "MSFT": 12, "AMZN": 11, "SPY": 9, "GLD": 9,
+                "INDA": 9, "ICLN": 7, "TLT": 5, "BND": 4}
         stance = "Moderately Bullish"
-        rationale = "Positive signals outweigh risks. Increasing NVDA to 20% and AMZN to 11%. Slight trim to hedges. Maintaining core positioning."
+        rationale = f"Positive tilt (macro {macro_score:+d}, micro {micro_score:+d}). Adding to risk. NVDA 20%, trimming hedges to 18%."
     else:
-        # Neutral: hold current base allocation
-        recommended = {
-            "NVDA": 18, "AAPL": 14, "MSFT": 12, "GLD": 12,
-            "AMZN": 10, "SPY": 8, "INDA": 8, "ICLN": 7,
-            "TLT": 6, "BND": 5,
-        }
+        base = {"NVDA": 18, "AAPL": 14, "MSFT": 12, "GLD": 12, "AMZN": 10, "SPY": 8,
+                "INDA": 8, "ICLN": 7, "TLT": 6, "BND": 5}
         stance = "Hold"
-        rationale = "No strong directional signals. Maintaining current allocation. Will reassess tomorrow."
+        rationale = f"Mixed signals (macro {macro_score:+d}, micro {micro_score:+d}). No strong conviction to change. Maintaining balanced positioning."
 
-    # Check if rebalance is needed (allocation drift > 3% on any position)
+    # Apply micro tilts: adjust +/-2% per position based on micro score
+    recommended = dict(base)
+    adjustments = []
+    for ticker, ps in position_scores.items():
+        if ticker in recommended:
+            if ps["score"] >= 2 and recommended[ticker] < 25:
+                adj = min(2, 25 - recommended[ticker])
+                recommended[ticker] += adj
+                adjustments.append(f"{ticker} +{adj}% (strong micro)")
+            elif ps["score"] <= -2 and recommended[ticker] > 2:
+                adj = min(2, recommended[ticker] - 2)
+                recommended[ticker] -= adj
+                adjustments.append(f"{ticker} -{adj}% (weak micro)")
+
+    # Normalize to 100%
+    total_alloc = sum(recommended.values())
+    if total_alloc != 100:
+        diff = 100 - total_alloc
+        # Adjust the largest position
+        largest = max(recommended, key=recommended.get)
+        recommended[largest] += diff
+
+    # Determine triggers
+    triggers = []
+    if total_score <= -5:
+        triggers.append("severe_bearish")
+    elif total_score <= -2:
+        triggers.append("bearish_tilt")
+    elif total_score >= 5:
+        triggers.append("strong_bullish")
+
+    # Drift detection
     should_rebalance = len(triggers) > 0
     if not should_rebalance and current_portfolio:
         current_allocs = {p.get("ticker"): p.get("allocation", 0) for p in current_portfolio}
@@ -533,21 +722,38 @@ def reassess():
                 triggers.append(f"drift_{ticker}")
                 break
 
+    # Build macro environment summary
+    regime = "Risk-Off" if total_score <= -3 else "Risk-On" if total_score >= 2 else "Neutral"
+
     return jsonify({
         "date": datetime.utcnow().isoformat(),
         "regime": regime,
         "stance": stance,
         "score": total_score,
-        "signals": signals,
+        "macroScore": macro_score,
+        "microScore": micro_score,
+        "signals": all_signals,
         "triggers": triggers,
         "shouldRebalance": should_rebalance,
         "recommended": recommended,
         "rationale": rationale,
+        "adjustments": adjustments,
+        "positionScores": position_scores,
         "macro_snapshot": {
-            "spy_1m": spy_1m, "vix": vix_level,
-            "tlt_1m": tlt_1m, "gld_1m": gld_1m,
-            "em_1m": em_1m, "oil_1m": oil_1m,
+            "spy": spy, "vix": round(vix_approx, 1),
+            "tlt": tlt, "gld": gld, "eem": eem, "uso": uso,
+            "qqq": qqq, "iwm": iwm, "hyg": hyg, "bnd": bnd,
+            "commodity_basket_1m": round(commodity_avg_1m, 1),
+            "credit_spread": round(credit_spread, 1),
+            "usd_proxy": round(usd_proxy, 1),
+            "breadth_spread": round(breadth_spread, 1),
+            "growth_vs_value": round(growth_vs_value, 1),
+            "safe_haven_spread": round(safe_haven_spread, 1),
         },
+        "scanCategories": [
+            "Regime", "Rates", "Yield Curve", "Inflation", "Credit",
+            "USD", "Safe Haven", "Breadth", "Geopolitical", "Rotation", "Micro"
+        ],
     })
 
 
