@@ -3,15 +3,12 @@ Portfolio Trading Simulator — Backend Server
 Dual mode: Live data via yfinance when available, realistic simulation fallback.
 """
 
-import json
 import math
 import os
 import random
 import time
 from datetime import datetime, timedelta
-from functools import lru_cache
 
-import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
@@ -246,6 +243,14 @@ def _try_yfinance(tickers, period, interval):
 @app.route("/")
 def index():
     return send_from_directory(".", "index.html")
+
+
+@app.route("/health")
+def healthcheck():
+    return jsonify({
+        "status": "ok",
+        "assets": len(ASSET_UNIVERSE),
+    })
 
 
 @app.route("/api/universe")
